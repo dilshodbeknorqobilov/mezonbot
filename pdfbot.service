@@ -1,0 +1,15 @@
+[Unit]
+Description=PDF Metadata Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/pdfbot
+Environment="BOT_TOKEN=8502485759:AAFI162SX0G02OK7aPuEbmL0ubkrdQuRtH0"
+ExecStart=/home/pdfbot/venv/bin/python /home/pdfbot/bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
