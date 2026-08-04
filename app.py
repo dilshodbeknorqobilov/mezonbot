@@ -102,7 +102,7 @@ async def handle_id(message: Message):
     filepath = os.path.join(PDF_DIR, f"{file_id}.pdf")
 
     if not os.path.exists(filepath):
-        await message.answer(f"{file_id}.pdf topilmadi.")
+        await message.answer(f"{file_id} ID bilan ma'lumot topilmadi.")
         return
 
     try:
