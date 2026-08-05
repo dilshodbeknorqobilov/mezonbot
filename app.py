@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.types import (
     Message,
     FSInputFile,
@@ -37,6 +37,11 @@ ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "8258695928,1743070073").spl
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# Referal (deep-link) orqali kelgan, lekin hali obuna/kontakt tekshiruvi
+# tugallanmagan foydalanuvchilarning ID so'rovi shu yerda vaqtincha saqlanadi.
+# Eslatma: bu xotirada (RAM) saqlanadi, bot qayta ishga tushsa tozalanadi.
+pending_ids: dict[int, str] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +141,20 @@ def format_caption(id_value: str, fio_value: str) -> str:
     return f"ID: {id_value}\nFIO: {fio_value}"
 
 
+def extract_referral_id(payload: str | None) -> str | None:
+    """
+    https://t.me/Mezonuzbot?start=ms_101074 -> Telegram buni "/start ms_101074"
+    ko'rinishida yuboradi, ya'ni payload = "ms_101074"
+    """
+    if not payload:
+        return None
+    if payload.startswith("ms_"):
+        candidate = payload[len("ms_"):]
+        if candidate.isdigit():
+            return candidate
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Klaviaturalar
 # ---------------------------------------------------------------------------
@@ -194,31 +213,73 @@ async def require_contact(message: Message) -> bool:
     return False
 
 
+async def process_pdf_request(message: Message, file_id: str) -> None:
+    filepath = find_pdf_file(file_id)
+
+    if not filepath:
+        await message.answer(f"{file_id} ID bilan ma'lumot topilmadi.")
+        return
+
+    try:
+        with open(filepath, "rb") as f:
+            reader = PdfReader(f)
+            raw_caption = reader.metadata.get("/Custom_Caption", "") if reader.metadata else ""
+    except Exception as e:
+        await message.answer(f"Faylni o'qishda xato: {e}")
+        return
+
+    id_value, fio_value = parse_custom_caption(str(raw_caption)) if raw_caption else ("", "")
+    caption = format_caption(id_value, fio_value)
+
+    if len(caption) > 1024:
+        # Telegram caption limiti 1024 belgi, shuning uchun uzun bo'lsa alohida xabar bilan yuboramiz
+        await message.answer_document(document=FSInputFile(filepath))
+        await message.answer(caption)
+    else:
+        await message.answer_document(document=FSInputFile(filepath), caption=caption)
+
+
 # ---------------------------------------------------------------------------
 # Handlerlar
 # ---------------------------------------------------------------------------
 
 @dp.message(CommandStart())
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, command: CommandObject):
+    # Referal havola orqali kelgan bo'lsa: https://t.me/Mezonuzbot?start=ms_101074
+    referral_id = extract_referral_id(command.args)
+    if referral_id:
+        pending_ids[message.from_user.id] = referral_id
+
     if not await require_subscription(message):
         return
     if not await require_contact(message):
         return
-    await message.answer(
-        "Salom! PDF faylni olish uchun uning ID raqamini yuboring (masalan: 123456).",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+
+    pending = pending_ids.pop(message.from_user.id, None)
+    if pending:
+        await process_pdf_request(message, pending)
+    else:
+        await message.answer(
+            "Salom! PDF faylni olish uchun uning ID raqamini yuboring (masalan: 123456).",
+            reply_markup=ReplyKeyboardRemove(),
+        )
 
 
 @dp.callback_query(F.data == "check_sub")
 async def check_subscription(callback: CallbackQuery):
     if await is_subscribed(callback.from_user.id):
         await callback.message.edit_text("✅ Obuna tasdiqlandi.")
+
         if not has_phone(callback.from_user.id):
             await callback.message.answer(
                 "Davom etish uchun telefon raqamingizni ulashing:",
                 reply_markup=contact_keyboard(),
             )
+            return
+
+        pending = pending_ids.pop(callback.from_user.id, None)
+        if pending:
+            await process_pdf_request(callback.message, pending)
         else:
             await callback.message.answer("Endi ID raqamini yuboring.")
     else:
@@ -240,10 +301,15 @@ async def handle_contact(message: Message):
         phone_number=contact.phone_number,
     )
 
-    await message.answer(
-        "Rahmat! Endi PDF faylni olish uchun ID raqamini yuboring (masalan: 123456).",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    pending = pending_ids.pop(message.from_user.id, None)
+    if pending:
+        await message.answer("Rahmat!", reply_markup=ReplyKeyboardRemove())
+        await process_pdf_request(message, pending)
+    else:
+        await message.answer(
+            "Rahmat! Endi PDF faylni olish uchun ID raqamini yuboring (masalan: 123456).",
+            reply_markup=ReplyKeyboardRemove(),
+        )
 
 
 @dp.message(Command("admin"))
@@ -274,30 +340,7 @@ async def handle_id(message: Message):
     if not await require_contact(message):
         return
 
-    file_id = message.text.strip()
-    filepath = find_pdf_file(file_id)
-
-    if not filepath:
-        await message.answer(f"{file_id} ID bilan ma'lumot topilmadi.")
-        return
-
-    try:
-        with open(filepath, "rb") as f:
-            reader = PdfReader(f)
-            raw_caption = reader.metadata.get("/Custom_Caption", "") if reader.metadata else ""
-    except Exception as e:
-        await message.answer(f"Faylni o'qishda xato: {e}")
-        return
-
-    id_value, fio_value = parse_custom_caption(str(raw_caption)) if raw_caption else ("", "")
-    caption = format_caption(id_value, fio_value)
-
-    if len(caption) > 1024:
-        # Telegram caption limiti 1024 belgi, shuning uchun uzun bo'lsa alohida xabar bilan yuboramiz
-        await message.answer_document(document=FSInputFile(filepath))
-        await message.answer(caption)
-    else:
-        await message.answer_document(document=FSInputFile(filepath), caption=caption)
+    await process_pdf_request(message, message.text.strip())
 
 
 @dp.message()
